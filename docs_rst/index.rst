@@ -211,6 +211,7 @@ Misc
     qadapter_programming
     update_text
     filepad_tutorial
+    json_schema
 
 Reference
 =========
@@ -261,7 +262,7 @@ Want to see something added or changed? There are many ways to make that a reali
 
 Please submit questions, issues / bug reports, and all other communication through the `FireWorks Discourse forum <https://discuss.matsci.org/c/fireworks>`_.
 
-Make contributions through GitHub using our `Contribution Guidelines. <https://github.com/materialsproject/fireworks/blob/master/CONTRIBUTING.md>`_
+Make contributions through GitHub using our `Contribution Guidelines. <https://github.com/materialsproject/fireworks/blob/main/CONTRIBUTING.md>`_
 
 The list of contributors to FireWorks can be found :doc:`here </contributors>`.
 

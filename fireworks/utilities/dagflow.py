@@ -4,16 +4,46 @@ __author__ = 'Ivan Kondov'
 __email__ = 'ivan.kondov@kit.edu'
 __copyright__ = 'Copyright 2017, Karlsruhe Institute of Technology'
 
+import warnings
 from itertools import combinations
+import igraph
 from igraph import Graph
+
+DF_TASKS = ['PyTask', 'CommandLineTask', 'ForeachTask', 'JoinDictTask',
+            'JoinListTask']
+
+DEFAULT_IGRAPH_VISUAL_STYLE = {
+    "bbox": (1280, 800),
+    "margin": [200, 100, 200, 100],
+    "vertex_label_dist": 2,
+}
+
+# for graph visualization, code "roots" green (start), "leaves" red (end),
+# any other blue
+try:
+    import matplotlib
+    # only needed for color-coding with favorite named colors, not imported
+    # in top level as matplotlib is no Fireworks requirement.
+
+    DEFAULT_IGRAPH_VERTEX_COLOR_CODING = {
+        'root': matplotlib.colors.cnames['forestgreen'],
+        'leaf': matplotlib.colors.cnames['indianred'],
+        'other': matplotlib.colors.cnames['lightsteelblue'],
+    }
+except ImportError:
+    DEFAULT_IGRAPH_VERTEX_COLOR_CODING = {
+        'root': '#228B22',
+        'leaf': '#CD5C5C',
+        'other': '#B0C4DE',
+    }
 
 
 class DAGFlow(Graph):
     """ The purpose of this class is to help construction, validation and
     visualization of workflows. """
 
-    def __init__(self, steps, links=None, nlinks=None, name=None):
-        Graph.__init__(self, directed=True, graph_attrs={'name': name})
+    def __init__(self, steps, links=None, nlinks=None, name=None, **kwargs):
+        Graph.__init__(self, directed=True, graph_attrs={'name': name}, **kwargs)
 
         for step in steps:
             self._set_io_fields(step)
@@ -25,10 +55,7 @@ class DAGFlow(Graph):
             self._add_ctrlflow_links(self._get_links(nlinks))
         elif links:
             self._add_ctrlflow_links(links)
-        self.validate()
-        self.check_dataflow()
         self._add_dataflow_links()
-        self.validate()
 
     @classmethod
     def from_fireworks(cls, fireworkflow):
@@ -53,8 +80,9 @@ class DAGFlow(Graph):
 
         for idx, fwk in enumerate(wfd['fws']):
             step = steps[idx]
-            spec = fwk['spec']
-            step.update(spec)
+            step.update(fwk['spec'])
+            tasks = fwk['spec']['_tasks']
+            step['_tasks'] = [t for t in tasks if t['_fw_name'] in DF_TASKS]
 
             def task_input(task, spec):
                 """ extracts labels of available inputs from a task """
@@ -82,13 +110,13 @@ class DAGFlow(Graph):
             step_data = []
             for task in step['_tasks']:
                 true_task = task['task'] if 'task' in task else task
-                step_data.extend(task_input(true_task, spec))
+                step_data.extend(task_input(true_task, fwk['spec']))
                 if 'outputs' in true_task:
                     assert isinstance(true_task['outputs'], list), (
-                            'outputs must be a list in fw_id ' + str(step['id']))
+                        'outputs must be a list in fw_id ' + str(step['id']))
                 if 'inputs' in true_task:
                     assert isinstance(true_task['inputs'], list), (
-                            'inputs must be a list in fw_id ' + str(step['id']))
+                        'inputs must be a list in fw_id ' + str(step['id']))
             step['data'] = list(set(step_data))
 
         return cls(steps=steps, links=links, name=name)
@@ -105,7 +133,7 @@ class DAGFlow(Graph):
     def _get_ctrlflow_links(self):
         """ Returns a list of unique tuples of link ids """
         links = []
-        for ilink in set([link.tuple for link in list(self.es)]):
+        for ilink in {link.tuple for link in list(self.es)}:
             source = self.vs[ilink[0]]['id']
             target = self.vs[ilink[1]]['id']
             links.append((source, target))
@@ -198,7 +226,7 @@ class DAGFlow(Graph):
 
         # data chunks distributed over several sibling steps
         for task in step['_tasks']:
-            step['chunk'] = True if 'chunk_number' in task else False
+            step['chunk'] = 'chunk_number' in task
 
     def _get_steps(self):
         """ Returns a list of dictionaries describing the steps """
@@ -213,7 +241,9 @@ class DAGFlow(Graph):
         """ Returns the vertex index for a step with provided id """
         for vertex in list(self.vs):
             if vertex['id'] == step_id:
-                return vertex.index
+                retval = vertex.index
+                break
+        return retval
 
     def _get_cycles(self):
         """ Returns a partial list of cycles in case of erroneous workflow """
@@ -224,9 +254,17 @@ class DAGFlow(Graph):
             flatten = lambda l: [item for sublist in l for item in sublist]
             if flatten(lst):
                 break
-        cycs = [list(x) for x in set([tuple(sorted(l)) for l in lst])]
+        cycs = [list(x) for x in {tuple(sorted(l)) for l in lst}]
         cycs = [[self.vs[ind]['id'] for ind in cycle] for cycle in cycs]
         return cycs
+
+    def _get_roots(self):
+        """Returns all roots (i.e. vertices without incoming edges)"""
+        return [i for i, v in enumerate(self.degree(mode=igraph.IN)) if v == 0]
+
+    def _get_leaves(self):
+        """Returns all leaves (i.e. vertices without outgoing edges)"""
+        return [i for i, v in enumerate(self.degree(mode=igraph.OUT)) if v == 0]
 
     def delete_ctrlflow_links(self):
         """ Deletes graph edges corresponding to control flow links """
@@ -243,8 +281,8 @@ class DAGFlow(Graph):
         for vertex in list(self.vs):
             vertex['label'] = vertex['name'] + ', id: ' + str(vertex['id'])
 
-    def validate(self):
-        """ Validate the workflow """
+    def check(self):
+        """ Correctness check of the workflow """
         try:
             assert self.is_dag(), 'The workflow graph must be a DAG.'
         except AssertionError as err:
@@ -258,6 +296,7 @@ class DAGFlow(Graph):
         assert len(self.vs['id']) == len(set(self.vs['id'])), (
             'Workflow steps must have unique IDs.'
         )
+        self.check_dataflow()
 
     def check_dataflow(self):
         """ Checks whether all inputs and outputs match """
@@ -266,7 +305,7 @@ class DAGFlow(Graph):
         for vertex in list(self.vs):
             outputs = vertex['outputs']
             assert len(outputs) == len(set(outputs)), (
-                'The tasks in a workflow step may not share output fields.',
+                'Several tasks may not use the same name in outputs list.',
                 [x for n, x in enumerate(outputs) if x in outputs[:n]]
             )
         # evaluate matching sources
@@ -274,7 +313,7 @@ class DAGFlow(Graph):
             for entity in vertex['inputs']:
                 sources = self._get_sources(vertex, entity)
                 assert len(sources) == 1, (
-                    'An input field must have exactly one source',
+                    'Every input in inputs list must have exactly one source.',
                     'step', vertex['name'], 'entity', entity,
                     'sources', sources
                 )
@@ -289,7 +328,7 @@ class DAGFlow(Graph):
 
     def to_dot(self, filename='wf.dot', view='combined'):
         """ Writes the workflow into a file in DOT format """
-        graph = self.copy()
+        graph = DAGFlow(**self.to_dict())
         if view == 'controlflow':
             graph.delete_dataflow_links()
         elif view == 'dataflow':
@@ -312,3 +351,76 @@ class DAGFlow(Graph):
                 if isinstance(val, bool):
                     del vertex[key]
         graph.write_dot(filename)
+
+
+def plot_wf(wf, view='combined', labels=False, **kwargs):
+    """Plot workflow DAG via igraph.plot.
+
+    Args:
+        wf (Workflow)
+        view (str): same as in 'to_dot'. Default: 'combined'
+        labels (bool): show a FW's name and id as labels in graph
+
+    Other **kwargs can be any igraph plotting style keyword, overrides default.
+    See https://igraph.org/python/doc/tutorial/tutorial.html for possible
+    keywords. See `plot_wf` code for defaults.
+
+    Returns:
+        igraph.drawing.Plot
+    """
+
+    dagf = DAGFlow.from_fireworks(wf)
+    if labels:
+        dagf.add_step_labels()
+
+    # copied from to_dot
+    if view == 'controlflow':
+        dagf.delete_dataflow_links()
+    elif view == 'dataflow':
+        dagf.delete_ctrlflow_links()
+    elif view == 'combined':
+        dlinks = []
+        for vertex1, vertex2 in combinations(dagf.vs.indices, 2):
+            clinks = list(set(dagf.incident(vertex1, mode='ALL'))
+                          & set(dagf.incident(vertex2, mode='ALL')))
+            if len(clinks) > 1:
+                for link in clinks:
+                    if dagf.es[link]['label'] == ' ':
+                        dlinks.append(link)
+        dagf.delete_edges(dlinks)
+
+    # remove non-string, non-numeric attributes because write_dot() warns
+    for vertex in dagf.vs:
+        for key, val in vertex.attributes().items():
+            if not isinstance(val, (str, int, float, complex)):
+                del vertex[key]
+            if isinstance(val, bool):
+                del vertex[key]
+
+    # plotting defaults
+    visual_style = DEFAULT_IGRAPH_VISUAL_STYLE.copy()
+
+    # generic plotting defaults
+    visual_style["layout"] = dagf.layout_kamada_kawai()
+
+    # vertex defaults
+    dagf_roots = dagf._get_roots()
+    dagf_leaves = dagf._get_leaves()
+
+    def color_coding(v):
+        if v in dagf_roots:
+            return DEFAULT_IGRAPH_VERTEX_COLOR_CODING['root']
+        elif v in dagf_leaves:
+            return DEFAULT_IGRAPH_VERTEX_COLOR_CODING['leaf']
+        else:
+            return DEFAULT_IGRAPH_VERTEX_COLOR_CODING['other']
+
+    visual_style["vertex_color"] = [color_coding(v) for v in range(dagf.vcount())]
+
+    visual_style.update(kwargs)
+
+    # special treatment
+    if 'layout' in kwargs and isinstance(kwargs['layout'], str):
+        visual_style["layout"] = dagf.layout(kwargs['layout'])
+
+    return igraph.plot(dagf, **visual_style)

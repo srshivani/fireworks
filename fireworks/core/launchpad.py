@@ -51,6 +51,32 @@ __date__ = 'Jan 30, 2013'
 
 # TODO: lots of duplication reduction and cleanup possible
 
+def sort_aggregation(sort):
+    """Build sorting aggregation pipeline.
+
+    Args:
+        sort [(str,int)]: sorting keys and directions as a list of
+                          (str, int) tuples, i.e. [('updated_on', 1)]
+    """
+    # Fix for sorting by dates which are actually stored as strings:
+    # Not sure about the underlying issue's source, but apparently some
+    # dates are stored as strings and others as date objects.
+    # Following pipeline makes sure all stored dates are actually date
+    # objects for proper comparison when sorting.
+    # Assumption below is that dates are either strings or date objects,
+    # nothing else.
+    aggregation = []
+    for k, _ in sort:
+        if k in {'updated_on', 'created_on'}:
+            aggregation.append(
+                {'$set': {k: {'$dateFromString': {
+                    'dateString': '$' + k,
+                    'onError': '$' + k,  # if conversion fails, just return original object
+                }}}}
+            )
+    aggregation.append({'$sort': {k: v for k, v in sort}})
+    return aggregation
+
 
 class LockedWorkflowError(ValueError):
     """
@@ -577,17 +603,19 @@ class LaunchPad(FWSerializable):
                         links_dict['metadata'], links_dict['created_on'],
                         links_dict['updated_on'], fw_states)
 
-    def delete_wf(self, fw_id, delete_launch_dirs=False):
-        """
-        Delete the workflow containing firework with the given id.
+    def delete_fws(self, fw_ids, delete_launch_dirs=False):
+        """Delete a set of fireworks identified by their fw_ids.
+
+        ATTENTION: This function serves maintenance purposes and will leave
+        workflows untouched. Its use will thus result in a corrupted database.
+        Use 'delete_wf' instead for consistently deleting workflows together
+        with theit fireworks.
 
         Args:
-            fw_id (int): Firework id
+            fw_ids ([int]): Firework ids
             delete_launch_dirs (bool): if True all the launch directories associated with
                 the WF will be deleted as well, if possible.
         """
-        links_dict = self.workflows.find_one({'nodes': fw_id})
-        fw_ids = links_dict["nodes"]
         potential_launch_ids = []
         launch_ids = []
         for i in fw_ids:
@@ -612,15 +640,28 @@ class LaunchPad(FWSerializable):
                 shutil.rmtree(d, ignore_errors=True)
 
         print("Remove fws %s" % fw_ids)
-        print("Remove launches %s" % launch_ids)
-        print("Removing workflow.")
         if self.gridfs_fallback is not None:
             for lid in launch_ids:
                 for f in self.gridfs_fallback.find({"metadata.launch_id": lid}):
                     self.gridfs_fallback.delete(f._id)
+        print("Remove launches %s" % launch_ids)
         self.launches.delete_many({'launch_id': {"$in": launch_ids}})
         self.offline_runs.delete_many({'launch_id': {"$in": launch_ids}})
         self.fireworks.delete_many({"fw_id": {"$in": fw_ids}})
+
+    def delete_wf(self, fw_id, delete_launch_dirs=False):
+        """
+        Delete the workflow containing firework with the given id.
+
+        Args:
+            fw_id (int): Firework id
+            delete_launch_dirs (bool): if True all the launch directories associated with
+                the WF will be deleted as well, if possible.
+        delete_launch_dirs"""
+        links_dict = self.workflows.find_one({'nodes': fw_id})
+        fw_ids = links_dict["nodes"]
+        self.delete_fws(fw_ids, delete_launch_dirs=delete_launch_dirs)
+        print("Removing workflow.")
         self.workflows.delete_one({'nodes': fw_id})
 
     def get_wf_summary_dict(self, fw_id, mode="more"):
@@ -727,7 +768,6 @@ class LaunchPad(FWSerializable):
         Returns:
             list: list of firework ids matching the query
         """
-        fw_ids = []
         coll = "launches" if launches_mode else "fireworks"
         criteria = query if query else {}
         if launches_mode:
@@ -738,12 +778,31 @@ class LaunchPad(FWSerializable):
             if limit:
                 return ValueError(
                     "Cannot count_only and limit at the same time!")
-            return getattr(self, coll).find(criteria, {}, sort=sort).count()
 
-        for fw in getattr(self, coll).find(criteria, {"fw_id": True},
-                                           sort=sort).limit(limit):
-            fw_ids.append(fw["fw_id"])
-        return fw_ids
+        aggregation = []
+
+        if criteria is not None:
+            aggregation.append({'$match': criteria})
+
+        if count_only:
+            aggregation.append({'$count': 'count'})
+            self.m_logger.debug("Aggregation '{}'.".format(aggregation))
+
+            cursor = getattr(self, coll).aggregate(aggregation)
+            res = list(cursor)
+            return res[0]['count'] if len(res) > 0 else 0
+
+        if sort is not None:
+            aggregation.extend(sort_aggregation(sort))
+
+        aggregation.append({'$project': {'fw_id': True, '_id': False}})
+
+        if limit is not None and limit > 0:
+            aggregation.append({'$limit': limit})
+
+        self.m_logger.debug("Aggregation '{}'.".format(aggregation))
+        cursor = getattr(self, coll).aggregate(aggregation)
+        return [fw["fw_id"] for fw in cursor]
 
     def get_wf_ids(self, query=None, sort=None, limit=0, count_only=False):
         """
@@ -758,17 +817,101 @@ class LaunchPad(FWSerializable):
         Returns:
             list: list of firework ids
         """
-        wf_ids = []
         criteria = query if query else {}
+        aggregation = []
+
+        if criteria is not None:
+            aggregation.append({'$match': criteria})
+
         if count_only:
-            return self.workflows.find(criteria, {"nodes": True},
-                                       sort=sort).limit(limit).count()
+            aggregation.append({'$count': 'count'})
+            self.m_logger.debug("Aggregation '{}'.".format(aggregation))
 
-        for fw in self.workflows.find(criteria, {"nodes": True},
-                                      sort=sort).limit(limit):
-            wf_ids.append(fw["nodes"][0])
+            cursor = self.workflows.aggregate(aggregation)
+            res = list(cursor)
+            return res[0]['count'] if len(res) > 0 else 0
 
-        return wf_ids
+        if sort is not None:
+            aggregation.extend(sort_aggregation(sort))
+
+        aggregation.append({'$project': {'nodes': True, '_id': False}})
+
+        if limit is not None and limit > 0:
+            aggregation.append({'$limit': limit})
+
+        self.m_logger.debug("Aggregation '{}'.".format(aggregation))
+        cursor = self.workflows.aggregate(aggregation)
+
+        return [fw["nodes"][0] for fw in cursor]
+
+    def get_fw_ids_in_wfs(self, wf_query=None, fw_query=None, sort=None,
+                          limit=0, count_only=False, launches_mode=False):
+        """
+        Return all fw ids that match fw_query within workflows that match wf_query.
+
+        Args:
+            wf_query (dict): representing a Mongo query on workflows
+            fw_query (dict): representing a Mongo query on Fireworks
+            sort [(str,str)]: sort argument in Pymongo format
+            limit (int): limit the results
+            count_only (bool): only return the count rather than explicit ids
+            launches_mode (bool): query the launches collection instead of fireworks
+
+        Returns:
+            list: list of firework ids matching the query
+        """
+        coll = "launches" if launches_mode else "fireworks"
+        if launches_mode:
+            lids = self._get_active_launch_ids()
+            if fw_query is None:
+                fw_query = {}
+            fw_query["launch_id"] = {"$in": lids}
+
+        if count_only:
+            if limit:
+                return ValueError(
+                    "Cannot count_only and limit at the same time!")
+
+        aggregation = []
+
+        if wf_query is not None:
+            aggregation.append({'$match': wf_query},)
+
+        aggregation.extend([
+            {'$project': {'nodes': True, '_id': False}},
+            {'$unwind': '$nodes'},
+            {'$lookup': {
+                'from': coll,  # fireworks or launches
+                'localField': 'nodes',
+                'foreignField': 'fw_id',
+                'as': 'fireworks'}},
+            {'$project': {'fireworks': 1, '_id': 0}},
+            {'$unwind': '$fireworks'},
+            {'$replaceRoot': {'newRoot': '$fireworks'}},
+        ])
+
+        if fw_query is not None:
+            aggregation.append({'$match': fw_query})
+
+        if count_only:
+            aggregation.append({'$count': 'count'})
+            self.m_logger.debug("Aggregation '{}'.".format(aggregation))
+
+            cursor = self.workflows.aggregate(aggregation)
+            res = list(cursor)
+            return res[0]['count'] if len(res) > 0 else 0
+
+        if sort is not None:
+            aggregation.extend(sort_aggregation(sort))
+
+        aggregation.append({'$project': {'fw_id': True, '_id': False}})
+
+        if limit is not None and limit > 0:
+            aggregation.append({'$limit': limit})
+
+        self.m_logger.debug("Aggregation '{}'.".format(aggregation))
+        cursor = self.workflows.aggregate(aggregation)
+        return [fw["fw_id"] for fw in cursor]
 
     def run_exists(self, fworker=None):
         """
@@ -1177,7 +1320,7 @@ class LaunchPad(FWSerializable):
             rerun (bool): if True, the expired reservations are cancelled and the fireworks rerun.
 
         Returns:
-            [int]: list of expired lacunh ids
+            [int]: list of expired launch ids
         """
         bad_launch_ids = []
         now_time = datetime.datetime.utcnow()

@@ -5,6 +5,7 @@ Subpackages
 -----------
 
 .. toctree::
+   :maxdepth: 4
 
    fireworks.features.tests
 
@@ -58,7 +59,6 @@ fireworks.features.stats module
    :members:
    :undoc-members:
    :show-inheritance:
-
 
 Module contents
 ---------------

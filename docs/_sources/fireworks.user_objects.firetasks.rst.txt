@@ -5,6 +5,7 @@ Subpackages
 -----------
 
 .. toctree::
+   :maxdepth: 4
 
    fireworks.user_objects.firetasks.tests
 
@@ -58,7 +59,6 @@ fireworks.user\_objects.firetasks.unittest\_tasks module
    :members:
    :undoc-members:
    :show-inheritance:
-
 
 Module contents
 ---------------

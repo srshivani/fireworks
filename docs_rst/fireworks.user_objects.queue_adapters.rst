@@ -5,6 +5,7 @@ Subpackages
 -----------
 
 .. toctree::
+   :maxdepth: 4
 
    fireworks.user_objects.queue_adapters.tests
 
@@ -26,7 +27,6 @@ fireworks.user\_objects.queue\_adapters.pbs\_newt\_adapter module
    :members:
    :undoc-members:
    :show-inheritance:
-
 
 Module contents
 ---------------

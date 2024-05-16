@@ -35,6 +35,23 @@ def get_nested_dict(input_dict, key):
         current = current[tok]
 
 
+def arrow_to_dot(input_dict):
+    """
+    Converts arrows ('->') in dict keys to dots '.' recursively.
+    Allows for storing MongoDB neseted document queries in MongoDB.
+
+    Args:
+      input_dict (dict)
+
+    Returns:
+      dict
+    """
+    if not isinstance(input_dict, dict):
+        return input_dict
+    else:
+        return {k.replace("->", "."): arrow_to_dot(v) for k, v in input_dict.items()}
+
+
 @singleton
 class DictMods(object):
     """
@@ -61,7 +78,7 @@ class DictMods(object):
     def __init__(self):
         self.supported_actions = {}
         for i in dir(self):
-            if (not re.match('__\w+__', i)) and callable(getattr(self, i)):
+            if (not re.match(r'__\w+__', i)) and callable(getattr(self, i)):
                 self.supported_actions["_" + i] = getattr(self, i)
 
     @staticmethod

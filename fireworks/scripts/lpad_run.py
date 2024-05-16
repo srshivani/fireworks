@@ -9,7 +9,10 @@ A runnable script for managing a FireWorks database (a command-line interface to
 """
 
 from argparse import ArgumentParser, ArgumentTypeError
+import copy
 import os
+import shutil
+import re
 import time
 import ast
 import json
@@ -86,7 +89,7 @@ def parse_helper(lp, args, wf_mode=False, skip_pw=False):
 
     if hasattr(args, "sort") and args.sort:
         sort = [(args.sort, ASCENDING)]
-    elif hasattr(args, "sort") and args.rsort:
+    elif hasattr(args, "rsort") and args.rsort:
         sort = [(args.rsort, DESCENDING)]
     else:
         sort = None
@@ -189,7 +192,7 @@ def add_wf(args):
         fwf = Workflow.from_file(f)
         if args.check:
             from fireworks.utilities.dagflow import DAGFlow
-            DAGFlow.from_fireworks(fwf)
+            DAGFlow.from_fireworks(fwf).check()
         lp.add_wf(fwf)
 
 
@@ -211,10 +214,7 @@ def dump_wf(args):
 def check_wf(args):
     from fireworks.utilities.dagflow import DAGFlow
     lp = get_lp(args)
-    dagf = DAGFlow.from_fireworks(lp.get_wf_by_fw_id(args.fw_id))
-    if args.view is not None:
-        dagf.add_step_labels()
-        dagf.to_dot(args.dot_file, view=args.view)
+    DAGFlow.from_fireworks(lp.get_wf_by_fw_id(args.fw_id)).check()
 
 
 def add_wf_dir(args):
@@ -224,8 +224,43 @@ def add_wf_dir(args):
         lp.add_wf(fwf)
 
 
-def get_fws(args):
-    lp = get_lp(args)
+def print_fws(ids, lp, args):
+    """Prints results of some FireWorks query to stdout."""
+    fws = []
+    if args.display_format == 'ids':
+        fws = ids
+    elif args.display_format == 'count':
+        fws = [ids]
+    else:
+        for id in ids:
+            fw = lp.get_fw_by_id(id)
+            d = fw.to_dict()
+            d['state'] = d.get('state', 'WAITING')
+            if args.display_format == 'more' or args.display_format == 'less':
+                if 'archived_launches' in d:
+                    del d['archived_launches']
+                del d['spec']
+            if args.display_format == 'less':
+                if 'launches' in d:
+                    del d['launches']
+            fws.append(d)
+    if len(fws) == 1:
+        fws = fws[0]
+
+    print(args.output(fws))
+
+
+def get_fw_ids_helper(lp, args, count_only=None):
+    """Build fws query from command line options and submit.
+
+    Parameters:
+        lp (fireworks.core.firework.Launchpad)
+        args (argparse.Namespace)
+        count_only (bool): if None, then looked up in args.
+
+    Returns:
+        [int]: resulting fw_ids or count of fws in query.
+    """
     if sum([bool(x) for x in [args.fw_id, args.name, args.state, args.query]]) > 1:
         raise ValueError('Please specify exactly one of (fw_id, name, state, query)')
     if sum([bool(x) for x in [args.fw_id, args.name, args.state, args.query]]) == 0:
@@ -254,6 +289,8 @@ def get_fws(args):
     else:
         sort = None
 
+    if count_only is None:
+        count_only = (args.display_format == 'count')
     if args.qid:
         ids = lp.get_fw_ids_from_reservation_id(args.qid)
         if query:
@@ -261,8 +298,13 @@ def get_fws(args):
             ids = lp.get_fw_ids(query, sort, args.max, launches_mode=args.launches_mode)
 
     else:
-        ids = lp.get_fw_ids(query, sort, args.max, count_only=args.display_format == 'count',
+        ids = lp.get_fw_ids(query, sort, args.max, count_only=count_only,
                             launches_mode=args.launches_mode)
+    return ids
+
+
+def get_fws_helper(lp, ids, args):
+    """Get fws from ids in a representation according to args.display_format."""
     fws = []
     if args.display_format == 'ids':
         fws = ids
@@ -283,8 +325,76 @@ def get_fws(args):
             fws.append(d)
     if len(fws) == 1:
         fws = fws[0]
+    return fws
 
+
+def get_fws(args):
+    lp = get_lp(args)
+    ids = get_fw_ids_helper(lp, args)
+    fws = get_fws_helper(lp, ids, args)
     print(args.output(fws))
+
+
+def get_fws_in_wfs(args):
+    # get_wfs
+    lp = get_lp(args)
+    if sum([bool(x) for x in [args.wf_fw_id, args.wf_name, args.wf_state, args.wf_query]]) > 1:
+        raise ValueError('Please specify exactly one of (fw_id, name, state, query)')
+    if sum([bool(x) for x in [args.wf_fw_id, args.wf_name, args.wf_state, args.wf_query]]) == 0:
+        args.wf_query = '{}'
+
+    if args.wf_fw_id:
+        wf_query = {'nodes': {"$in": args.wf_fw_id}}
+    elif args.wf_name:
+        wf_query = {'name': args.wf_name}
+    elif args.wf_state:
+        wf_query = {'state': args.wf_state}
+    else:
+        wf_query = ast.literal_eval(args.wf_query)
+
+    # get_fws
+    if sum([bool(x) for x in [args.fw_fw_id, args.fw_name, args.fw_state, args.fw_query]]) > 1:
+        raise ValueError('Please specify exactly one of (fw_id, name, state, query)')
+    if sum([bool(x) for x in [args.fw_fw_id, args.fw_name, args.fw_state, args.fw_query]]) == 0:
+        args.fw_query = '{}'
+        args.display_format = args.display_format if args.display_format else 'ids'
+    if sum([bool(x) for x in [args.fw_fw_id, args.fw_name, args.qid]]) > 1:
+        raise ValueError('Please specify exactly one of (fw_id, name, qid)')
+    else:
+        args.display_format = args.display_format if args.display_format else 'more'
+
+    if args.fw_fw_id:
+        fw_query = {'fw_id': {"$in": args.fw_fw_id}}
+    elif args.fw_name and not args.launches_mode:
+        fw_query = {'name': args.fw_name}
+    elif args.fw_state:
+        fw_query = {'state': args.fw_state}
+    elif args.fw_query:
+        fw_query = ast.literal_eval(args.fw_query)
+    else:
+        fw_query = None
+
+    if args.sort:
+        sort = [(args.sort, ASCENDING)]
+    elif args.rsort:
+        sort = [(args.rsort, DESCENDING)]
+    else:
+        sort = None
+
+    if args.qid:
+        ids = lp.get_fw_ids_from_reservation_id(args.qid)
+        if fw_query:
+            fw_query['fw_id'] = {"$in": ids}
+            ids = lp.get_fw_ids_in_wfs(wf_query=wf_query, fw_query=fw_query,
+                                       sort=sort, limit=args.max,
+                                       launches_mode=args.launches_mode)
+    else:
+        ids = lp.get_fw_ids_in_wfs(wf_query=wf_query, fw_query=fw_query,
+                                   sort=sort, limit=args.max,
+                                   count_only=args.display_format == 'count',
+                                   launches_mode=args.launches_mode)
+
+    print_fws(ids, lp, args)
 
 
 def update_fws(args):
@@ -374,7 +484,11 @@ def detect_lostruns(args):
                                     refresh=args.refresh, query=query, launch_query=launch_query)
     lp.m_logger.debug('Detected {} lost launches: {}'.format(len(fl), fl))
     lp.m_logger.info('Detected {} lost FWs: {}'.format(len(ff), ff))
+    if args.display_format is not None and args.display_format != 'none':
+        print_fws(ff, lp, args)
     lp.m_logger.info('Detected {} inconsistent FWs: {}'.format(len(fi), fi))
+    if args.display_format is not None and args.display_format != 'none':
+        print_fws(fi, lp, args)
     if len(ff) > 0 and not args.fizzle and not args.rerun:
         print("You can fix lost FWs using the --rerun or --fizzle arguments to the "
               "detect_lostruns command")
@@ -385,6 +499,14 @@ def detect_lostruns(args):
 
 def detect_unreserved(args):
     lp = get_lp(args)
+    if args.display_format is not None and args.display_format != 'none':
+        unreserved = lp.detect_unreserved(expiration_secs=args.time, rerun=False)
+        # very inefficient, replace by mongo aggregation
+        fw_ids = []
+        for launch_id in unreserved:
+            launch = lp.get_launch_by_id(launch_id)
+            fw_ids.append(launch.fw_id)
+        print_fws(fw_ids, lp, args)
     print(lp.detect_unreserved(expiration_secs=args.time, rerun=args.rerun))
 
 
@@ -535,6 +657,13 @@ def set_priority(args):
     lp.m_logger.info("Finished setting priorities of {} FWs".format(len(fw_ids)))
 
 
+def _open_webbrowser(url):
+    """Open a web browser after a delay to give the web server more startup time."""
+    import webbrowser
+    time.sleep(2)
+    webbrowser.open(url)
+
+
 def webgui(args):
     from fireworks.flask_site.app import app
     app.lp = get_lp(args)
@@ -554,14 +683,11 @@ def webgui(args):
             app.BASE_Q_WF["state"] = app.BASE_Q["state"]
 
     if not args.server_mode:
-        from multiprocessing import Process
-        p1 = Process(
-            target=app.run,
-            kwargs={"host": args.host, "port": args.port, "debug": args.debug})
+        from threading import Thread
+        url = "http://{}:{}".format(args.host, args.port)
+        p1 = Thread(target=_open_webbrowser, args=(url,))
         p1.start()
-        import webbrowser
-        time.sleep(2)
-        webbrowser.open("http://{}:{}".format(args.host, args.port))
+        app.run(host=args.host, port=args.port, debug=args.debug)
         p1.join()
     else:
         try:
@@ -691,6 +817,28 @@ def maintain(args):
     lp.maintain(args.infinite, args.maintain_interval)
 
 
+def orphaned(args):
+    # get_fws
+    lp = get_lp(args)
+    fw_ids = get_fw_ids_helper(lp, args, count_only=False)
+
+    # get_wfs
+    orphaned_fw_ids = []
+    for fw_id in fw_ids:
+        query = {'nodes': fw_id}
+        wf_ids = lp.get_wf_ids(query)
+        if len(wf_ids) == 0:
+            orphaned_fw_ids.append(fw_id)
+
+    fws = get_fws_helper(lp, orphaned_fw_ids, args)
+    if args.remove:
+        lp.m_logger.info('Found {} orphaned fw_ids: {}'.format(
+            len(orphaned_fw_ids), orphaned_fw_ids))
+        lp.delete_fws(orphaned_fw_ids, delete_launch_dirs=args.delete_launch_dirs)
+    else:
+        print(args.output(fws))
+
+
 def get_output_func(format):
     if format == "json":
         return lambda x: json.dumps(x, default=DATETIME_HANDLER, indent=4)
@@ -724,6 +872,7 @@ def lpad():
 
     # This makes common argument options easier to maintain. E.g., what if
     # there is a new state or disp option?
+    # NOTE: Those sets of standard options are not used consistently below (jotelha)
     fw_id_args = ["-i", "--fw_id"]
     fw_id_kwargs = {"type": str, "help": "fw_id"}
 
@@ -736,6 +885,12 @@ def lpad():
                    "choices": ["all", "more", "less", "ids", "count",
                                "reservations"]}
 
+    # enhanced display options allow for value 'none' or None (default) for no output
+    enh_disp_args = copy.deepcopy(disp_args)
+    enh_disp_kwargs = copy.deepcopy(disp_kwargs)
+    enh_disp_kwargs["choices"].append("none")
+    enh_disp_kwargs["default"] = None
+
     query_args = ["-q", "--query"]
     query_kwargs = {"help": 'Query (enclose pymongo-style dict in '
                             'single-quotes, e.g. \'{"state":"COMPLETED"}\')'}
@@ -747,6 +902,34 @@ def lpad():
 
     qid_args = ["--qid"]
     qid_kwargs = {"help": "Query by reservation id of job in queue"}
+
+    # for using fw- and wf-specific options on one command line, distinguish by prefix fw and wf
+    # prefix short one-dash options with 'wf', i.e. '-i' -> '-wfi'
+    # prefix long two-dash options with 'wf_', i.e. '--fw_id' -> '--wf_fw_id'
+    wf_prefixed_fw_id_args = [re.sub('^-([^-].*)$', '-wf\\1', s) for s in fw_id_args]
+    wf_prefixed_fw_id_args = [re.sub('^--(.*)$', '--wf_\\1', s) for s in wf_prefixed_fw_id_args]
+
+    wf_prefixed_state_args = [re.sub('^-([^-].*)$', '-wf\\1', s) for s in state_args]
+    wf_prefixed_state_args = [re.sub('^--(.*)$', '--wf_\\1', s) for s in wf_prefixed_state_args]
+
+    wf_prefixed_query_args = [re.sub('^-([^-].*)$', '-wf\\1', s) for s in query_args]
+    wf_prefixed_query_args = [re.sub('^--(.*)$', '--wf_\\1', s) for s in wf_prefixed_query_args]
+
+    # prefix short one-dash options with 'fw', i.e. '-i' -> '-fwi'
+    # prefix long two-dash options with 'fw_', i.e. '--fw_id' -> '--fw_fw_id'
+    fw_prefixed_fw_id_args = [re.sub('^-([^-].*)$', '-fw\\1', s) for s in fw_id_args]
+    fw_prefixed_fw_id_args = [re.sub('^--(.*)$', '--fw_\\1', s) for s in fw_prefixed_fw_id_args]
+
+    fw_prefixed_state_args = [re.sub('^-([^-].*)$', '-fw\\1', s) for s in state_args]
+    fw_prefixed_state_args = [re.sub('^--(.*)$', '--fw_\\1', s) for s in fw_prefixed_state_args]
+
+    fw_prefixed_query_args = [re.sub('^-([^-].*)$', '-fw\\1', s) for s in query_args]
+    fw_prefixed_query_args = [re.sub('^--(.*)$', '--fw_\\1', s) for s in fw_prefixed_query_args]
+
+    # filter all long options, i.e. '--fw_id' and strip off preceding '--'
+    fw_id_options = [re.sub('^--(.*)$', '\\1', opt)
+                     for opt in [*fw_id_args, *wf_prefixed_fw_id_args, *fw_prefixed_fw_id_args]
+                     if re.match('^--.*$', opt)]
 
     version_parser = subparsers.add_parser(
         'version',
@@ -781,15 +964,9 @@ def lpad():
                               action='store_true')
     addwf_parser.set_defaults(func=add_wf, check=False)
 
-    check_wf_parser = subparsers.add_parser('check_wflow', help='validate and graph a workflow from launchpad')
+    check_wf_parser = subparsers.add_parser('check_wflow', help='check a workflow from launchpad')
     check_wf_parser.add_argument('-i', '--fw_id', type=int, help='the id of a firework from the workflow')
-    check_wf_parser.add_argument('-g', '--graph', type=str,
-                                 help='graph the workflow in DOT format; allowed views: dataflow, controlflow, '
-                                      'combined.',
-                                 dest='view', default=None)
-    check_wf_parser.add_argument('-f', '--dot_file', help='path to store the workflow graph, default: workflow.dot',
-                                 default='workflow.dot')
-    check_wf_parser.set_defaults(func=check_wf, control_flow=False, data_flow=False)
+    check_wf_parser.set_defaults(func=check_wf)
 
     get_launchdir_parser = subparsers.add_parser('get_launchdir',
                                                  help='get the directory of the most recent launch of the given fw_id.'
@@ -840,6 +1017,29 @@ def lpad():
     get_fw_parser.add_argument('--rsort', help='Reverse sort results',
                                choices=["created_on", "updated_on"])
     get_fw_parser.set_defaults(func=get_fws)
+
+    get_fw_in_wf_parser = subparsers.add_parser(
+        'get_fws_in_wflows', help='get information about FireWorks in Workflows')
+
+    get_fw_in_wf_parser.add_argument(*wf_prefixed_fw_id_args, **fw_id_kwargs)
+    get_fw_in_wf_parser.add_argument('-wfn', '--wf_name', help='get WFs with this name')
+    get_fw_in_wf_parser.add_argument(*wf_prefixed_state_args, **state_kwargs)
+    get_fw_in_wf_parser.add_argument(*wf_prefixed_query_args, **query_kwargs)
+
+    get_fw_in_wf_parser.add_argument(*fw_prefixed_fw_id_args, **fw_id_kwargs)
+    get_fw_in_wf_parser.add_argument('-fwn', '--fw_name', help='get FWs with this name')
+    get_fw_in_wf_parser.add_argument(*fw_prefixed_state_args, **state_kwargs)
+    get_fw_in_wf_parser.add_argument(*fw_prefixed_query_args, **query_kwargs)
+    get_fw_in_wf_parser.add_argument(*launches_mode_args, **launches_mode_kwargs)
+    get_fw_in_wf_parser.add_argument(*qid_args, **qid_kwargs)
+    get_fw_in_wf_parser.add_argument(*disp_args, **disp_kwargs)
+    get_fw_in_wf_parser.add_argument('-m', '--max', help='limit results', default=0,
+                                     type=int)
+    get_fw_in_wf_parser.add_argument('--sort', help='Sort results',
+                                     choices=["created_on", "updated_on"])
+    get_fw_in_wf_parser.add_argument('--rsort', help='Reverse sort results',
+                                     choices=["created_on", "updated_on"])
+    get_fw_in_wf_parser.set_defaults(func=get_fws_in_wfs)
 
     trackfw_parser = subparsers.add_parser('track_fws', help='Track FireWorks')
     trackfw_parser.add_argument(*fw_id_args, **fw_id_kwargs)
@@ -1038,6 +1238,7 @@ def lpad():
     reservation_parser.add_argument('--time', help='expiration time (seconds)',
                                     default=RESERVATION_EXPIRATION_SECS, type=int)
     reservation_parser.add_argument('--rerun', help='cancel and rerun expired reservations', action='store_true')
+    reservation_parser.add_argument(*enh_disp_args, **enh_disp_kwargs)
     reservation_parser.set_defaults(func=detect_unreserved)
 
     fizzled_parser = subparsers.add_parser('detect_lostruns',
@@ -1057,6 +1258,7 @@ def lpad():
                                 help='restrict search to only FWs matching this query')
     fizzled_parser.add_argument('-lq', '--launch_query',
                                 help='restrict search to only launches matching this query')
+    fizzled_parser.add_argument(*enh_disp_args, **enh_disp_kwargs)
     fizzled_parser.set_defaults(func=detect_lostruns)
 
     priority_parser = subparsers.add_parser('set_priority', help='modify the priority of one or more FireWorks')
@@ -1129,6 +1331,29 @@ def lpad():
                                  default=MAINTAIN_INTERVAL, type=int)
     maintain_parser.set_defaults(func=maintain)
 
+    orphaned_parser = admin_subparser.add_parser('orphaned', help='Find orphaned FireWorks')
+    orphaned_parser.add_argument(*fw_id_args, **fw_id_kwargs)
+    orphaned_parser.add_argument('-n', '--name', help='get FWs with this name')
+    orphaned_parser.add_argument(*state_args, **state_kwargs)
+    orphaned_parser.add_argument(*query_args, **query_kwargs)
+    orphaned_parser.add_argument(*launches_mode_args, **launches_mode_kwargs)
+    orphaned_parser.add_argument(*qid_args, **qid_kwargs)
+    orphaned_parser.add_argument(*disp_args, **disp_kwargs)
+    orphaned_parser.add_argument('-m', '--max', help='limit results', default=0,
+                                 type=int)
+    orphaned_parser.add_argument('--sort', help='Sort results',
+                                 choices=["created_on", "updated_on"])
+    orphaned_parser.add_argument('--rsort', help='Reverse sort results',
+                                 choices=["created_on", "updated_on"])
+    orphaned_parser.add_argument('--remove', help='delete orphaned',
+                                 action='store_true')
+    orphaned_parser.add_argument('--ldirs', help="the launch directories "
+                                 "associated with the orphaned Fireworks will "
+                                 "be deleted as well, if possible",
+                                 dest="delete_launch_dirs",
+                                 action='store_true')
+    orphaned_parser.set_defaults(func=orphaned)
+
     tuneup_parser = admin_subparser.add_parser('tuneup',
                                                help='Tune-up the database (should be performed during '
                                                     'scheduled downtime)')
@@ -1199,12 +1424,13 @@ def lpad():
         # if no command supplied, print help
         parser.print_help()
     else:
-        if hasattr(args, "fw_id") and args.fw_id is not None and \
-                isinstance(args.fw_id, six.string_types):
-            if "," in args.fw_id:
-                args.fw_id = [int(x) for x in args.fw_id.split(",")]
-            else:
-                args.fw_id = [int(args.fw_id)]
+        for opt in fw_id_options:
+            if hasattr(args, opt) and getattr(args, opt) is not None and \
+                    isinstance(getattr(args, opt), six.string_types):
+                if "," in getattr(args, opt):
+                    setattr(args, opt, [int(x) for x in getattr(args, opt).split(",")])
+                else:
+                    setattr(args, opt, [int(getattr(args, opt))])
 
         args.func(args)
 

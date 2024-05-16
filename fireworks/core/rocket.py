@@ -49,7 +49,7 @@ def do_ping(launchpad, launch_id):
 
 
 def ping_launch(launchpad, launch_id, stop_event, master_thread):
-    while not stop_event.is_set() and master_thread.isAlive():
+    while not stop_event.is_set() and master_thread.is_alive():
         do_ping(launchpad, launch_id)
         stop_event.wait(PING_TIME_SECS)
 
@@ -82,7 +82,7 @@ def stop_backgrounds(ping_stop, btask_stops):
 
 def background_task(btask, spec, stop_event, master_thread):
     num_launched = 0
-    while not stop_event.is_set() and master_thread.isAlive():
+    while not stop_event.is_set() and master_thread.is_alive():
         for task in btask.tasks:
             task.run_task(spec)
         if btask.sleep_time > 0:
@@ -458,7 +458,6 @@ class Rocket:
             # and both fws generate the exact same file. That can lead to
             # overriding. But as far as I know, this is an illogical use
             # of a workflow, so I can't see it happening in normal use.
-            filepaths = {}
             for k, v in my_spec.get("_files_out").items():
                 files = glob.glob(os.path.join(launch_dir, v))
                 if files:
@@ -466,10 +465,5 @@ class Rocket:
                     fwaction.mod_spec.append({
                         "_set": {"_files_prev->{:s}".format(k): filepath}
                     })
-        elif "_files_prev" in my_spec:
-            # This ensures that _files_prev are not passed from Firework to
-            # Firework. We do not want output files from fw1 to be used by fw3
-            # in the sequence of fw1->fw2->fw3
-            fwaction.update_spec["_files_prev"] = {}
 
         return fwaction

@@ -5,6 +5,7 @@ Subpackages
 -----------
 
 .. toctree::
+   :maxdepth: 4
 
    fireworks.core.tests
 
@@ -50,7 +51,6 @@ fireworks.core.rocket\_launcher module
    :members:
    :undoc-members:
    :show-inheritance:
-
 
 Module contents
 ---------------

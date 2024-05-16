@@ -5,6 +5,7 @@ Subpackages
 -----------
 
 .. toctree::
+   :maxdepth: 4
 
    fireworks.core
    fireworks.examples
@@ -26,7 +27,6 @@ fireworks.fw\_config module
    :members:
    :undoc-members:
    :show-inheritance:
-
 
 Module contents
 ---------------
